@@ -131,7 +131,7 @@ class ResnetBlock(nn.Module):
         del h3
 
         if temb is not None:
-            h4 += self.temb_proj(nonlinearity(temb))[:,:,None,None]
+            h4 = h4 + self.temb_proj(nonlinearity(temb))[:,:,None,None]
 
         h5 = self.norm2(h4)
         del h4
@@ -151,9 +151,7 @@ class ResnetBlock(nn.Module):
             else:
                 x = self.nin_shortcut(x)
 
-        h8 += x
-        return h8
-
+        return x + h8
 
 class LinAttnBlock(LinearAttention):
     """to match AttnBlock usage"""
@@ -229,17 +227,18 @@ class AttnBlock(nn.Module):
             end = i + slice_size
 
             w1 = torch.bmm(q[:, i:end], k)     # b,hw,hw    w[b,i,j]=sum_c q[b,i,c]k[b,c,j]
-            w1 *= (int(c)**(-0.5))
-            w2 = torch.nn.functional.softmax(w1, dim=2)
+            w2 = w1 * (int(c)**(-0.5))
             del w1
+            w3 = torch.nn.functional.softmax(w2, dim=2)
+            del w2
 
             # attend to values
             v1 = v.reshape(b, c, h*w)
-            w3 = w2.permute(0, 2, 1)   # b,hw,hw (first hw of k, second of q)
-            del w2
+            w4 = w3.permute(0, 2, 1)   # b,hw,hw (first hw of k, second of q)
+            del w3
 
-            h_[:, :, i:end] = torch.bmm(v1, w3)     # b, c,hw (hw of q) h_[b,c,j] = sum_i v[b,c,i] w_[b,i,j]
-            del v1, w3
+            h_[:, :, i:end] = torch.bmm(v1, w4)     # b, c,hw (hw of q) h_[b,c,j] = sum_i v[b,c,i] w_[b,i,j]
+            del v1, w4
 
         h2 = h_.reshape(b, c, h, w)
         del h_
