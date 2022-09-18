@@ -13,6 +13,10 @@ import re
 import sys
 import traceback
 import transformers
+import io
+import hashlib
+import cv2
+import skimage
 
 from omegaconf import OmegaConf
 from PIL import Image, ImageOps
@@ -27,6 +31,24 @@ from ldm.dream.pngwriter           import PngWriter
 from ldm.dream.image_util          import InitImageResizer
 from ldm.dream.devices             import choose_torch_device
 from ldm.dream.conditioning        import get_uc_and_c
+
+def fix_func(orig):
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        def new_func(*args, **kw):
+            device = kw.get("device", "mps")
+            kw["device"]="cpu"
+            return orig(*args, **kw).to(device)
+        return new_func
+    return orig
+
+torch.rand = fix_func(torch.rand)
+torch.rand_like = fix_func(torch.rand_like)
+torch.randn = fix_func(torch.randn)
+torch.randn_like = fix_func(torch.randn_like)
+torch.randint = fix_func(torch.randint)
+torch.randint_like = fix_func(torch.randint_like)
+torch.bernoulli = fix_func(torch.bernoulli)
+torch.multinomial = fix_func(torch.multinomial)
 
 """Simplified text to image API for stable diffusion/latent diffusion
 
@@ -161,7 +183,7 @@ class Generate:
         for image, seed in results:
             name = f'{prefix}.{seed}.png'
             path = pngwriter.save_image_and_prompt_to_png(
-                image, f'{prompt} -S{seed}', name)
+                image, dream_prompt=f'{prompt} -S{seed}', name=name)
             outputs.append([path, seed])
         return outputs
 
@@ -200,11 +222,14 @@ class Generate:
             init_mask        = None,
             fit              = False,
             strength         = None,
+            init_color       = None,
             # these are specific to embiggen (which also relies on img2img args)
             embiggen       =    None,
             embiggen_tiles =    None,
             # these are specific to GFPGAN/ESRGAN
+            facetool         = None,
             gfpgan_strength  = 0,
+            codeformer_fidelity = None,
             save_original    = False,
             upscale          = None,
             # Set this True to handle KeyboardInterrupt internally
@@ -342,10 +367,17 @@ class Generate:
                 embiggen_tiles = embiggen_tiles,
             )
 
+            if init_color:
+                self.correct_colors(image_list           = results,
+                                    reference_image_path = init_color,
+                                    image_callback       = image_callback)
+
             if upscale is not None or gfpgan_strength > 0:
                 self.upscale_and_reconstruct(results,
                                              upscale        = upscale,
+                                             facetool       = facetool,
                                              strength       = gfpgan_strength,
+                                             codeformer_fidelity = codeformer_fidelity,
                                              save_original  = save_original,
                                              image_callback = image_callback)
 
@@ -455,17 +487,44 @@ class Generate:
 
         return self.model
 
+    def correct_colors(self,
+                       image_list,
+                       reference_image_path,
+                       image_callback = None):
+        reference_image = Image.open(reference_image_path)
+        correction_target = cv2.cvtColor(np.asarray(reference_image),
+                                         cv2.COLOR_RGB2LAB)
+        for r in image_list:
+            image, seed = r
+            image = cv2.cvtColor(np.asarray(image),
+                                 cv2.COLOR_RGB2LAB)
+            image = skimage.exposure.match_histograms(image,
+                                                      correction_target,
+                                                      channel_axis=2)
+            image = Image.fromarray(
+                cv2.cvtColor(image, cv2.COLOR_LAB2RGB).astype("uint8")
+            )
+            if image_callback is not None:
+                image_callback(image, seed)
+            else:
+                r[0] = image
+
     def upscale_and_reconstruct(self,
                                 image_list,
+                                facetool      = 'gfpgan',
                                 upscale       = None,
                                 strength      =  0.0,
+                                codeformer_fidelity = 0.75,
                                 save_original = False,
                                 image_callback = None):
         try:
             if upscale is not None:
                 from ldm.gfpgan.gfpgan_tools import real_esrgan_upscale
             if strength > 0:
-                from ldm.gfpgan.gfpgan_tools import run_gfpgan
+                if facetool == 'codeformer':
+                    from ldm.restoration.codeformer.codeformer import CodeFormerRestoration
+                else:
+                    from ldm.gfpgan.gfpgan_tools import run_gfpgan
         except (ModuleNotFoundError, ImportError):
             print(traceback.format_exc(), file=sys.stderr)
             print('>> You may need to install the ESRGAN and/or GFPGAN modules')
@@ -484,9 +543,12 @@ class Generate:
                         seed,
                     )
                 if strength > 0:
-                    image = run_gfpgan(
-                        image, strength, seed, 1
-                    )
+                    if facetool == 'codeformer':
+                        image = CodeFormerRestoration().process(image=image, strength=strength, device=self.device, seed=seed, fidelity=codeformer_fidelity)
+                    else:
+                        image = run_gfpgan(
+                            image, strength, seed, 1
+                        )
             except Exception as e:
                 print(
                     f'>> Error running RealESRGAN or GFPGAN. Your image was not upscaled.\n{e}'
@@ -549,7 +611,11 @@ class Generate:
 
         # this does the work
         c     = OmegaConf.load(config)
-        pl_sd = torch.load(weights, map_location='cpu')
+        with open(weights,'rb') as f:
+            weight_bytes = f.read()
+        self.model_hash  = self._cached_sha256(weights,weight_bytes)
+        pl_sd = torch.load(io.BytesIO(weight_bytes), map_location='cpu')
+        del weight_bytes
         sd    = pl_sd['state_dict']
         model = instantiate_from_config(c.model)
         m, u  = model.load_state_dict(sd, strict=False)
@@ -710,3 +776,24 @@ class Generate:
 
     def _has_cuda(self):
         return self.device.type == 'cuda'
+
+    def _cached_sha256(self,path,data):
+        dirname    = os.path.dirname(path)
+        basename   = os.path.basename(path)
+        base, _    = os.path.splitext(basename)
+        hashpath   = os.path.join(dirname,base+'.sha256')
+        if os.path.exists(hashpath) and os.path.getmtime(path) <= os.path.getmtime(hashpath):
+            with open(hashpath) as f:
+                hash = f.read()
+            return hash
+        print(f'>> Calculating sha256 hash of weights file')
+        tic = time.time()
+        sha = hashlib.sha256()
+        sha.update(data)
+        hash = sha.hexdigest()
+        toc = time.time()
+        print(f'>> sha256 = {hash}','(%4.2fs)' % (toc - tic))
+        with open(hashpath,'w') as f:
+            f.write(hash)
+        return hash
+

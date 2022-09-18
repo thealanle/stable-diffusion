@@ -1,14 +1,17 @@
-# Contributors
+---
+title: Contributors
+---
 
-The list of all the amazing people who have contributed to the various features that you get to experience in this fork.
+The list of all the amazing people who have contributed to the various features that you get to
+experience in this fork.
 
 We thank them for all of their time and hard work.
 
-_Original Author:_
+## **Original Author:**
 
-- Lincoln D. Stein <lincoln.stein@gmail.com>
+- [Lincoln D. Stein](mailto:lincoln.stein@gmail.com)
 
-_Contributions by:_
+## **Contributions by:**
 
 - [Sean McLellan](https://github.com/Oceanswave)
 - [Kevin Gibbons](https://github.com/bakkot)
@@ -48,8 +51,11 @@ _Contributions by:_
 - [Mihai](https://github.com/mh-dm)
 - [Any Winter](https://github.com/any-winter-4079)
 - [Doggettx](https://github.com/doggettx)
+- [Matthias Wild](https://github.com/mauwii)
+- [Kyle Schouviller](https://github.com/kyle0654)
+- [rabidcopy](https://github.com/rabidcopy)
 
-_Original CompVis Authors:_
+## **Original CompVis Authors:**
 
 - [Robin Rombach](https://github.com/rromb)
 - [Patrick von Platen](https://github.com/patrickvonplaten)
@@ -61,4 +67,5 @@ _Original CompVis Authors:_
 
 ---
 
-_If you have contributed and don't see your name on the list of contributors, please let one of the collaborators know about the omission, or feel free to make a pull request._
+_If you have contributed and don't see your name on the list of contributors, please let one of the
+collaborators know about the omission, or feel free to make a pull request._
